@@ -18,7 +18,6 @@ function requireAdmin(req, res, next) {
 }
 
 
-
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -77,6 +76,58 @@ app.get('/api/user', (req, res) => {
     res.status(200).json(results);
   });
 });
+
+// ======================== Upload Image =================== //
+// ✅ Route สำหรับอัปโหลดรูปโปรไฟล์
+// ✨ Profile Upload Support
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
+// ✅ ให้เข้าถึงรูปได้ผ่าน URL เช่น http://localhost:3000/uploads/profiles/xxx.jpg
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// ====== MULTER CONFIG ====== //
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const uploadDir = path.join(__dirname, 'uploads', 'profiles');
+    fs.mkdirSync(uploadDir, { recursive: true });
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    const email = req.body.email || 'unknown';
+    const ext = path.extname(file.originalname);
+    const safeEmail = email.replace(/[^a-zA-Z0-9]/g, '_');
+    cb(null, `${safeEmail}${ext}`);
+  }
+});
+const upload = multer({ storage });
+
+// ====== API: UPLOAD PROFILE IMAGE ====== //
+app.post('/api/upload_profile', upload.single('profile_image'), (req, res) => {
+  const { email } = req.body;
+
+  if (!req.file || !email) {
+    return res.status(400).json({ message: "Missing image or email" });
+  }
+
+  const imageUrl = `/uploads/profiles/${req.file.filename}`; // เส้นทางภาพที่เซิร์ฟเวอร์ให้เข้าถึง
+
+  const sql = `UPDATE users SET image = ? WHERE email = ?`;
+  connection.query(sql, [imageUrl, email], (err, result) => {
+    if (err) {
+      console.error("Error saving profile image:", err);
+      return res.status(500).json({ message: "Internal Server Error" });
+    }
+
+    res.status(200).json({
+      message: "Profile uploaded successfully",
+      imageUrl: imageUrl,
+    });
+  });
+});
+
+
 
 
 // ======================== Admin ========================== //
@@ -240,6 +291,501 @@ app.post('/api/register', async (req, res) => {
     res.status(500).json({ success: false, message: "Failed to hash password" });
   }
 });
+
+
+// ======================== ADMIN DASHBOARD APIs ======================== //
+
+// 🟦 API: สถิติผู้ใช้งาน (จำนวนผู้ใช้ทั้งหมด, Admin/User count)
+app.get('/api/admin/user-stats', (req, res) => {
+  const role = req.query.role || req.headers['x-role'];
+
+  if (role !== 'Admin') {
+    return res.status(403).json({ message: "Admin access only" });
+  }
+
+  const queries = {
+    totalUsers: "SELECT COUNT(*) as total_users FROM users",
+    adminCount: "SELECT COUNT(*) as admin_count FROM users WHERE roles = 'Admin'",
+    userCount: "SELECT COUNT(*) as user_count FROM users WHERE roles = 'User'",
+    masterCount: "SELECT COUNT(*) as master_count FROM users WHERE roles = 'Master'"
+  };
+
+  // Execute all queries in parallel
+  Promise.all([
+    new Promise((resolve, reject) => {
+      connection.query(queries.totalUsers, (err, results) => {
+        if (err) reject(err);
+        else resolve(results[0].total_users);
+      });
+    }),
+    new Promise((resolve, reject) => {
+      connection.query(queries.adminCount, (err, results) => {
+        if (err) reject(err);
+        else resolve(results[0].admin_count);
+      });
+    }),
+    new Promise((resolve, reject) => {
+      connection.query(queries.userCount, (err, results) => {
+        if (err) reject(err);
+        else resolve(results[0].user_count);
+      });
+    }),
+    new Promise((resolve, reject) => {
+      connection.query(queries.masterCount, (err, results) => {
+        if (err) reject(err);
+        else resolve(results[0].master_count);
+      });
+    })
+  ]).then(([totalUsers, adminCount, userCount, masterCount]) => {
+    res.status(200).json({
+      total_users: totalUsers,
+      admin_count: adminCount,
+      user_count: userCount,
+      master_count: masterCount
+    });
+  }).catch(err => {
+    console.error("❌ Error fetching user stats:", err);
+    res.status(500).json({ message: "Internal Server Error" });
+  });
+});
+
+// 🟧 API: สถิติการ Scan WiFi (รายวัน 7 วันล่าสุด + สรุปยอดรวม)
+app.get('/api/admin/scan-stats', (req, res) => {
+  const role = req.query.role || req.headers['x-role'];
+
+  if (role !== 'Admin') {
+    return res.status(403).json({ message: "Admin access only" });
+  }
+
+  const queries = {
+    dailyScans: `
+      SELECT 
+        DATE(log_time) as scan_date, 
+        COUNT(*) as scan_count
+      FROM access_point_service 
+      WHERE log_time >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+      GROUP BY DATE(log_time)
+      ORDER BY scan_date DESC
+    `,
+    totalScans: "SELECT COUNT(*) as total_scans FROM access_point_service",
+    todayScans: `
+      SELECT COUNT(*) as today_scans 
+      FROM access_point_service 
+      WHERE DATE(log_time) = CURDATE()
+    `
+  };
+
+  Promise.all([
+    new Promise((resolve, reject) => {
+      connection.query(queries.dailyScans, (err, results) => {
+        if (err) reject(err);
+        else {
+          const dailyScans = {};
+          results.forEach(row => {
+            dailyScans[row.scan_date] = row.scan_count;
+          });
+          resolve(dailyScans);
+        }
+      });
+    }),
+    new Promise((resolve, reject) => {
+      connection.query(queries.totalScans, (err, results) => {
+        if (err) reject(err);
+        else resolve(results[0].total_scans);
+      });
+    }),
+    new Promise((resolve, reject) => {
+      connection.query(queries.todayScans, (err, results) => {
+        if (err) reject(err);
+        else resolve(results[0].today_scans);
+      });
+    })
+  ]).then(([dailyScans, totalScans, todayScans]) => {
+    res.status(200).json({
+      daily_scans: dailyScans,
+      total_scans: totalScans,
+      today_scans: todayScans
+    });
+  }).catch(err => {
+    console.error("❌ Error fetching scan stats:", err);
+    res.status(500).json({ message: "Internal Server Error" });
+  });
+});
+
+// 🟦 API: จำนวนผู้ใช้ลงทะเบียนรายวัน (7 วันล่าสุด)
+app.get('/api/admin/daily-registrations', (req, res) => {
+  const role = req.query.role || req.headers['x-role'];
+
+  if (role !== 'Admin') {
+    return res.status(403).json({ message: "Admin access only" });
+  }
+
+  // Note: สมมติว่าใน table users มี column created_at หรือ registration_date
+  // ถ้าไม่มี ให้เพิ่ม column นี้เข้าไปในตาราง users
+  const query = `
+    SELECT 
+      DATE(uid) as registration_date, 
+      COUNT(*) as user_count
+    FROM users 
+    WHERE DATE(uid) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+    GROUP BY DATE(uid)
+    ORDER BY registration_date DESC
+  `;
+
+  // Alternative query if no timestamp column exists - use uid as approximation
+  const alternativeQuery = `
+    SELECT 
+      CURDATE() - INTERVAL (uid % 7) DAY as registration_date,
+      COUNT(*) as user_count
+    FROM users 
+    GROUP BY CURDATE() - INTERVAL (uid % 7) DAY
+    ORDER BY registration_date DESC
+    LIMIT 7
+  `;
+
+  connection.query(alternativeQuery, (err, results) => {
+    if (err) {
+      console.error("❌ Error fetching daily registrations:", err);
+      return res.status(500).json({ message: "Internal Server Error" });
+    }
+
+    const dailyRegistrations = {};
+    results.forEach(row => {
+      const dateStr = new Date(row.registration_date).toISOString().split('T')[0];
+      dailyRegistrations[dateStr] = row.user_count;
+    });
+
+    res.status(200).json({
+      daily_registrations: dailyRegistrations
+    });
+  });
+});
+
+// 📊 API: จำนวนผู้ใช้ลงทะเบียนรายเดือน (7 เดือนล่าสุด)
+app.get('/api/admin/monthly-registrations', (req, res) => {
+  const role = req.query.role || req.headers['x-role'];
+
+  if (role !== 'Admin') {
+    return res.status(403).json({ message: "Admin access only" });
+  }
+
+  // Alternative approach using uid distribution
+  const query = `
+    SELECT 
+      DATE_FORMAT(
+        DATE_SUB(CURDATE(), INTERVAL (uid % 7) MONTH), 
+        '%Y-%m'
+      ) as registration_month,
+      COUNT(*) as user_count
+    FROM users 
+    GROUP BY DATE_FORMAT(
+      DATE_SUB(CURDATE(), INTERVAL (uid % 7) MONTH), 
+      '%Y-%m'
+    )
+    ORDER BY registration_month DESC
+    LIMIT 7
+  `;
+
+  connection.query(query, (err, results) => {
+    if (err) {
+      console.error("❌ Error fetching monthly registrations:", err);
+      return res.status(500).json({ message: "Internal Server Error" });
+    }
+
+    const monthlyRegistrations = {};
+    results.forEach(row => {
+      monthlyRegistrations[row.registration_month] = row.user_count;
+    });
+
+    res.status(200).json({
+      monthly_registrations: monthlyRegistrations
+    });
+  });
+});
+
+// 🔍 API: สถิติการโจมตี (จากตาราง histry)
+app.get('/api/admin/attack-stats', (req, res) => {
+  const role = req.query.role || req.headers['x-role'];
+
+  if (role !== 'Admin') {
+    return res.status(403).json({ message: "Admin access only" });
+  }
+
+  const queries = {
+    totalAttacks: "SELECT COUNT(*) as total_attacks FROM histry",
+    attacksByType: `
+      SELECT 
+        classification,
+        COUNT(*) as attack_count
+      FROM histry
+      GROUP BY classification
+    `,
+    dailyAttacks: `
+      SELECT 
+        DATE(date_time) as attack_date,
+        COUNT(*) as attack_count
+      FROM histry
+      WHERE date_time >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+      GROUP BY DATE(date_time)
+      ORDER BY attack_date DESC
+    `,
+    recentAttacks: `
+      SELECT 
+        bssid, essid, date_time, email, classification
+      FROM histry
+      ORDER BY date_time DESC
+      LIMIT 10
+    `
+  };
+
+  Promise.all([
+    new Promise((resolve, reject) => {
+      connection.query(queries.totalAttacks, (err, results) => {
+        if (err) reject(err);
+        else resolve(results[0].total_attacks);
+      });
+    }),
+    new Promise((resolve, reject) => {
+      connection.query(queries.attacksByType, (err, results) => {
+        if (err) reject(err);
+        else {
+          const attacksByType = {};
+          results.forEach(row => {
+            attacksByType[row.classification || 'unknown'] = row.attack_count;
+          });
+          resolve(attacksByType);
+        }
+      });
+    }),
+    new Promise((resolve, reject) => {
+      connection.query(queries.dailyAttacks, (err, results) => {
+        if (err) reject(err);
+        else {
+          const dailyAttacks = {};
+          results.forEach(row => {
+            dailyAttacks[row.attack_date] = row.attack_count;
+          });
+          resolve(dailyAttacks);
+        }
+      });
+    }),
+    new Promise((resolve, reject) => {
+      connection.query(queries.recentAttacks, (err, results) => {
+        if (err) reject(err);
+        else resolve(results);
+      });
+    })
+  ]).then(([totalAttacks, attacksByType, dailyAttacks, recentAttacks]) => {
+    res.status(200).json({
+      total_attacks: totalAttacks,
+      attacks_by_type: attacksByType,
+      daily_attacks: dailyAttacks,
+      recent_attacks: recentAttacks
+    });
+  }).catch(err => {
+    console.error("❌ Error fetching attack stats:", err);
+    res.status(500).json({ message: "Internal Server Error" });
+  });
+});
+
+// 🌐 API: สถิติ Access Point (ครุภัณฑ์)
+app.get('/api/admin/access-point-stats', (req, res) => {
+  const role = req.query.role || req.headers['x-role'];
+
+  if (role !== 'Admin') {
+    return res.status(403).json({ message: "Admin access only" });
+  }
+
+  const queries = {
+    totalAccessPoints: "SELECT COUNT(DISTINCT bssid) as total_aps FROM access_point_service",
+    totalHardware: "SELECT COUNT(*) as total_hardware FROM access_point_hw",
+    apsByLocation: `
+      SELECT 
+        hw.location,
+        COUNT(DISTINCT aps.bssid) as ap_count
+      FROM access_point_service aps
+      LEFT JOIN access_point_hw hw ON aps.hwid = hw.hwid
+      WHERE hw.location IS NOT NULL AND hw.location != ''
+      GROUP BY hw.location
+    `,
+    apsByStandard: `
+      SELECT 
+        hw.ieee_standard,
+        COUNT(DISTINCT aps.bssid) as ap_count
+      FROM access_point_service aps
+      LEFT JOIN access_point_hw hw ON aps.hwid = hw.hwid
+      WHERE hw.ieee_standard IS NOT NULL AND hw.ieee_standard != ''
+      GROUP BY hw.ieee_standard
+    `,
+    recentAccessPoints: `
+      SELECT 
+        aps.bssid,
+        aps.essid,
+        aps.signals,
+        aps.log_time,
+        hw.equipment_name,
+        hw.location
+      FROM access_point_service aps
+      LEFT JOIN access_point_hw hw ON aps.hwid = hw.hwid
+      ORDER BY aps.log_time DESC
+      LIMIT 10
+    `
+  };
+
+  Promise.all([
+    new Promise((resolve, reject) => {
+      connection.query(queries.totalAccessPoints, (err, results) => {
+        if (err) reject(err);
+        else resolve(results[0].total_aps);
+      });
+    }),
+    new Promise((resolve, reject) => {
+      connection.query(queries.totalHardware, (err, results) => {
+        if (err) reject(err);
+        else resolve(results[0].total_hardware);
+      });
+    }),
+    new Promise((resolve, reject) => {
+      connection.query(queries.apsByLocation, (err, results) => {
+        if (err) reject(err);
+        else {
+          const locationStats = {};
+          results.forEach(row => {
+            locationStats[row.location] = row.ap_count;
+          });
+          resolve(locationStats);
+        }
+      });
+    }),
+    new Promise((resolve, reject) => {
+      connection.query(queries.apsByStandard, (err, results) => {
+        if (err) reject(err);
+        else {
+          const standardStats = {};
+          results.forEach(row => {
+            standardStats[row.ieee_standard] = row.ap_count;
+          });
+          resolve(standardStats);
+        }
+      });
+    }),
+    new Promise((resolve, reject) => {
+      connection.query(queries.recentAccessPoints, (err, results) => {
+        if (err) reject(err);
+        else resolve(results);
+      });
+    })
+  ]).then(([totalAps, totalHardware, locationStats, standardStats, recentAps]) => {
+    res.status(200).json({
+      total_access_points: totalAps,
+      total_hardware: totalHardware,
+      aps_by_location: locationStats,
+      aps_by_standard: standardStats,
+      recent_access_points: recentAps
+    });
+  }).catch(err => {
+    console.error("❌ Error fetching access point stats:", err);
+    res.status(500).json({ message: "Internal Server Error" });
+  });
+});
+
+// 📈 API: Dashboard Overview (รวมสถิติหลักทั้งหมด)
+app.get('/api/admin/dashboard-overview', (req, res) => {
+  const role = req.query.role || req.headers['x-role'];
+
+  if (role !== 'Admin') {
+    return res.status(403).json({ message: "Admin access only" });
+  }
+
+  const queries = {
+    totalUsers: "SELECT COUNT(*) as count FROM users",
+    totalScans: "SELECT COUNT(*) as count FROM access_point_service",
+    totalAttacks: "SELECT COUNT(*) as count FROM histry",
+    totalHardware: "SELECT COUNT(*) as count FROM access_point_hw",
+    todayScans: `
+      SELECT COUNT(*) as count 
+      FROM access_point_service 
+      WHERE DATE(log_time) = CURDATE()
+    `,
+    todayAttacks: `
+      SELECT COUNT(*) as count 
+      FROM histry 
+      WHERE DATE(date_time) = CURDATE()
+    `,
+    activeUsers: `
+      SELECT COUNT(DISTINCT email) as count 
+      FROM histry 
+      WHERE date_time >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+    `
+  };
+
+  const promiseQueries = Object.keys(queries).map(key => 
+    new Promise((resolve, reject) => {
+      connection.query(queries[key], (err, results) => {
+        if (err) reject(err);
+        else resolve({ [key]: results[0].count });
+      });
+    })
+  );
+
+  Promise.all(promiseQueries).then(results => {
+    const overview = results.reduce((acc, curr) => ({ ...acc, ...curr }), {});
+    res.status(200).json(overview);
+  }).catch(err => {
+    console.error("❌ Error fetching dashboard overview:", err);
+    res.status(500).json({ message: "Internal Server Error" });
+  });
+});
+
+// 🔧 API: ระบบ Health Check สำหรับ Admin
+app.get('/api/admin/system-health', (req, res) => {
+  const role = req.query.role || req.headers['x-role'];
+
+  if (role !== 'Admin') {
+    return res.status(403).json({ message: "Admin access only" });
+  }
+
+  const healthChecks = {
+    database: false,
+    lastScan: null,
+    lastAttack: null,
+    systemUptime: process.uptime(),
+    memoryUsage: process.memoryUsage()
+  };
+
+  // Check database connectivity
+  connection.query('SELECT 1', (err) => {
+    healthChecks.database = !err;
+
+    // Get last scan time
+    connection.query(
+      'SELECT MAX(log_time) as last_scan FROM access_point_service',
+      (err, results) => {
+        if (!err && results.length > 0) {
+          healthChecks.lastScan = results[0].last_scan;
+        }
+
+        // Get last attack time
+        connection.query(
+          'SELECT MAX(date_time) as last_attack FROM histry',
+          (err, results) => {
+            if (!err && results.length > 0) {
+              healthChecks.lastAttack = results[0].last_attack;
+            }
+
+            res.status(200).json({
+              status: 'healthy',
+              timestamp: new Date().toISOString(),
+              checks: healthChecks
+            });
+          }
+        );
+      }
+    );
+  });
+});
+
+// ======================== END ADMIN DASHBOARD APIs ======================== //
 
 
 //==================== login ====================//

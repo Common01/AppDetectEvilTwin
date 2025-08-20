@@ -2,10 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:temp_wifi_app/page/SplashPage.dart';
+import 'package:intl/date_symbol_data_local.dart'; // <<< เพิ่มอันนี้
+
 
 void main() async {
   // Ensure Flutter binding is initialized
   WidgetsFlutterBinding.ensureInitialized();
+
+  // โหลด locale ของ intl
+  await initializeDateFormatting('th', null);
   
   // Load environment variables
   try {
@@ -15,13 +20,13 @@ void main() async {
     print('⚠️  Could not load .env file: $e');
   }
   
-  // Set preferred orientations (optional)
+  // บังคับแนวตั้ง
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,
   ]);
   
-  // Set status bar style
+  // ตั้งค่า status bar
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: Brightness.light,
